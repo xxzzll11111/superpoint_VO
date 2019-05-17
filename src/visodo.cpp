@@ -23,9 +23,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 */
+
+//ZU9
+
 #include <stdlib.h>
 #include <Eigen/Dense>
 #include <opencv2/core/eigen.hpp>
+
 #include "vo_features.h"
 
 
@@ -36,10 +40,13 @@ using namespace std;
 #define MAX_FRAME 2894
 #define MIN_NUM_FEAT 2000
 #define PNPRANSAC false
+#define K_FREIBURG 2
+#define DETECTOR "superpoint"
+
 
 // IMP: Change the file directories (4 places) according to where your dataset is saved before running!
 
-void get_Name_and_Scale(int frame_id, char* rgbname, char* depthname, char* time)	{
+bool get_Name_and_Scale(int frame_id, char* rgbname, char* depthname, char* time)	{
   string line;
   char listname[200];
   int i = 0;
@@ -71,7 +78,85 @@ void get_Name_and_Scale(int frame_id, char* rgbname, char* depthname, char* time
   else {
     cout << "Unable to open file";
   }
+  return i>frame_id;
 }
+
+/* void bundleAdjustment (
+    const vector< Point3f > points_3d,
+    const vector< Point2f > points_2d,
+    const Mat& K,
+    Mat& R, Mat& t )
+{
+    // 初始化g2o
+    typedef g2o::BlockSolver< g2o::BlockSolverTraits<6,3> > Block;  // pose 维度为 6, landmark 维度为 3
+    Block::LinearSolverType* linearSolver = new g2o::LinearSolverCSparse<Block::PoseMatrixType>(); // 线性方程求解器
+    Block* solver_ptr = new Block ( linearSolver );     // 矩阵块求解器
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg ( solver_ptr );
+    g2o::SparseOptimizer optimizer;
+    optimizer.setAlgorithm ( solver );
+
+    // vertex
+    g2o::VertexSE3Expmap* pose = new g2o::VertexSE3Expmap(); // camera pose
+    Eigen::Matrix3d R_mat;
+    R_mat <<
+          R.at<double> ( 0,0 ), R.at<double> ( 0,1 ), R.at<double> ( 0,2 ),
+               R.at<double> ( 1,0 ), R.at<double> ( 1,1 ), R.at<double> ( 1,2 ),
+               R.at<double> ( 2,0 ), R.at<double> ( 2,1 ), R.at<double> ( 2,2 );
+    pose->setId ( 0 );
+    pose->setEstimate ( g2o::SE3Quat (
+                            R_mat,
+                            Eigen::Vector3d ( t.at<double> ( 0,0 ), t.at<double> ( 1,0 ), t.at<double> ( 2,0 ) )
+                        ) );
+    optimizer.addVertex ( pose );
+
+    int index = 1;
+    for ( const Point3f p:points_3d )   // landmarks
+    {
+        g2o::VertexSBAPointXYZ* point = new g2o::VertexSBAPointXYZ();
+        point->setId ( index++ );
+        point->setEstimate ( Eigen::Vector3d ( p.x, p.y, p.z ) );
+        point->setMarginalized ( true ); // g2o 中必须设置 marg 参见第十讲内容
+        optimizer.addVertex ( point );
+    }
+
+    // parameter: camera intrinsics
+    g2o::CameraParameters* camera = new g2o::CameraParameters (
+        K.at<double> ( 0,0 ), Eigen::Vector2d ( K.at<double> ( 0,2 ), K.at<double> ( 1,2 ) ), 0
+    );
+    camera->setId ( 0 );
+    optimizer.addParameter ( camera );
+
+    // edges
+    index = 1;
+    for ( const Point2f p:points_2d )
+    {
+        g2o::EdgeProjectXYZ2UV* edge = new g2o::EdgeProjectXYZ2UV();
+        edge->setId ( index );
+        edge->setVertex ( 0, dynamic_cast<g2o::VertexSBAPointXYZ*> ( optimizer.vertex ( index ) ) );
+        edge->setVertex ( 1, pose );
+        edge->setMeasurement ( Eigen::Vector2d ( p.x, p.y ) );
+        edge->setParameterId ( 0,0 );
+        edge->setInformation ( Eigen::Matrix2d::Identity() );
+        optimizer.addEdge ( edge );
+        index++;
+    }
+
+    chrono::steady_clock::time_point t1 = chrono::steady_clock::now();
+    optimizer.setVerbose ( true );
+    optimizer.initializeOptimization();
+    optimizer.optimize ( 100 );
+    chrono::steady_clock::time_point t2 = chrono::steady_clock::now();
+    chrono::duration<double> time_used = chrono::duration_cast<chrono::duration<double>> ( t2-t1 );
+    cout<<"optimization costs time: "<<time_used.count() <<" seconds."<<endl;
+
+    cout<<endl<<"after optimization:"<<endl;
+    cout<<"T="<<endl<<Eigen::Isometry3d ( pose->estimate() ).matrix() <<endl;
+    
+    Mat T;
+    eigen2cv(Eigen::Isometry3d ( pose->estimate() ).matrix(), T);
+    R = T.rowRange(0,3).colRange(0,3);
+    t = T.rowRange(0,3).col(3);
+} */
 
 int main( int argc, char** argv )	{
   DPUKernel *kernel;
@@ -96,6 +181,10 @@ int main( int argc, char** argv )	{
   // sprintf(filename1, "/home/share/kitti_odometry/dataset/sequences/00/image_0/%06d.png", 0);
   // sprintf(filename2, "/home/share/kitti_odometry/dataset/sequences/00/image_0/%06d.png", 1);
   get_Name_and_Scale(0, filename1, depthname1, time_stamp);
+  
+  myfile << time_stamp << " " << 0 << " " << 0 << " " << 0 << " ";
+  myfile << 0 << " " << 0 << " " << 0 << " " << 1 << endl;
+  
   get_Name_and_Scale(1, filename2, depthname2, time_stamp);
 
   char text[100];
@@ -130,10 +219,20 @@ int main( int argc, char** argv )	{
   // featureDetection(img_1, points1);        //detect features in img_1
   // vector<uchar> status;
 
-  //Mat K = ( Mat_<double> ( 3,3 ) << 517.3, 0, 318.6, 0, 516.5, 255.3, 0, 0, 1 );//freiburg1
-  Mat K = ( Mat_<double> ( 3,3 ) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1 );//freiburg2
-  //Mat K = ( Mat_<double> ( 3,3 ) << 535.4, 0, 320.1, 0, 539.2, 247.6, 0, 0, 1 );//freiburg3
-  featureTracking_superpoint(task, img_1,img_2,d1,K,points1,points2); //track those features to img_2
+  Mat K;
+  if ( K_FREIBURG == 1 )
+    K = ( Mat_<double> ( 3,3 ) << 517.3, 0, 318.6, 0, 516.5, 255.3, 0, 0, 1 );//freiburg1
+  else if  ( K_FREIBURG == 2 )
+    K = ( Mat_<double> ( 3,3 ) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1 );//freiburg2
+  else
+    K = ( Mat_<double> ( 3,3 ) << 535.4, 0, 320.1, 0, 539.2, 247.6, 0, 0, 1 );//freiburg3
+  
+  if(DETECTOR=="orb")
+    featureTracking_ORB(img_1,img_2,d1,K,points1,points2); //track those features to img_2
+  else if(DETECTOR=="sift")
+    featureTracking_sift(img_1,img_2,d1,K,points1,points2);
+  else
+    featureTracking_superpoint(task, img_1,img_2,d1,K,points1,points2); //track those features to img_2
   cout<<"2d pairs: "<<points2.size() <<endl;
 
   //TODO: add a fucntion to load these values directly from KITTI's calib files
@@ -153,6 +252,7 @@ int main( int argc, char** argv )	{
     solvePnP ( points1, points2, K, Mat(), r, t, false, cv::SOLVEPNP_EPNP ); // 调用OpenCV 的 PnP 求解，可选择EPNP，DLS等方法
   Mat R;
   cv::Rodrigues ( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
+  //bundleAdjustment ( points1, points2, K, R, t );
   R = R.t();
   t = -R * t;
 
@@ -163,9 +263,15 @@ int main( int argc, char** argv )	{
   Mat dpic;
 
   char filename[200];
-
+  
   R_f = R.clone();
   t_f = t.clone();
+  
+  Eigen::Matrix3d R_eigen;
+  cv2eigen(R_f, R_eigen);
+  Eigen::Quaterniond q_f = Eigen::Quaterniond(R_eigen); 
+  myfile << time_stamp << " " << t_f.at<double>(0) << " " << t_f.at<double>(1) << " " << t_f.at<double>(2) << " ";
+  myfile << q_f.x() << " " << q_f.y() << " " << q_f.z() << " " << q_f.w() << endl;
 
   clock_t begin = clock();
 
@@ -175,24 +281,36 @@ int main( int argc, char** argv )	{
   Mat traj = Mat::zeros(600, 600, CV_8UC3);
 
   for(int numFrame=2; numFrame < MAX_FRAME; numFrame++)	{
-  	//sprintf(filename, "/home/share/kitti_odometry/dataset/sequences/00/image_0/%06d.png", numFrame);
+  	t1=clock();//程序段开始前取得系统运行时间(ms)
+
+    //sprintf(filename, "/home/share/kitti_odometry/dataset/sequences/00/image_0/%06d.png", numFrame);
     dpic = imread ( depthname2, CV_LOAD_IMAGE_UNCHANGED );       // 深度图为16位无符号数，单通道图像
     
-    get_Name_and_Scale(numFrame, filename, depthname2, time_stamp);
+    if(!get_Name_and_Scale(numFrame, filename, depthname2, time_stamp))
+        break;
 
     //cout << "Scale is " << scale << endl;
     
     cout << numFrame << endl;
   	Mat currImage_c = imread(filename);
-  	cvtColor(currImage_c, currImage, COLOR_BGR2GRAY);
+  	
+    cvtColor(currImage_c, currImage, COLOR_BGR2GRAY);
   	// vector<uchar> status;
   	
-    t1=clock();//程序段开始前取得系统运行时间(ms)
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "read picture time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.046013s
 
-    featureTracking_superpoint(task, prevImage, currImage, dpic, K, prevFeatures, currFeatures);
+  	t1=clock();//程序段开始前取得系统运行时间(ms)
+    
+    if(DETECTOR=="orb")
+        featureTracking_ORB(prevImage, currImage, dpic, K, prevFeatures, currFeatures);
+    else if(DETECTOR=="sift")
+        featureTracking_sift(prevImage, currImage, dpic, K, prevFeatures, currFeatures);
+    else
+        featureTracking_superpoint(task, prevImage, currImage, dpic, K, prevFeatures, currFeatures);
     
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    //cout << "featureTracking time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "featureTracking time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.513374s
 
   	t1=clock();//程序段开始前取得系统运行时间(ms)
     /* E = findEssentialMat(currFeatures, prevFeatures, focal, pp, RANSAC, 0.999, 1.0, mask);
@@ -203,10 +321,11 @@ int main( int argc, char** argv )	{
     else
         solvePnP ( prevFeatures, currFeatures, K, Mat(), r, t, false, cv::SOLVEPNP_EPNP ); // 调用OpenCV 的 PnP 求解，可选择EPNP，DLS等方法
     cv::Rodrigues ( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
+    //bundleAdjustment ( prevFeatures, currFeatures, K, R, t );
     R = R.t(); 
     t = -R * t;
-    cout<<"R="<<R<<endl;
-    cout<<"t="<<t<<endl;
+    // cout<<"R="<<R<<endl;
+    // cout<<"t="<<t<<endl;
     
     /* Mat prevPts(2,prevFeatures.size(), CV_64F), currPts(2,currFeatures.size(), CV_64F);
 
@@ -248,7 +367,7 @@ int main( int argc, char** argv )	{
     //prevFeatures = currFeatures;
     
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    //cout << "compute time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "compute time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.000971s
 
     t1=clock();//程序段开始前取得系统运行时间(ms)
     int x = int(t_f.at<double>(0)*50) + 300;
@@ -263,17 +382,17 @@ int main( int argc, char** argv )	{
     //imshow( "Road facing camera", currImage_c );
     imshow( "Trajectory", traj );
     
-    Eigen::Matrix3d R_eigen;
     cv2eigen(R_f, R_eigen);
-    Eigen::Quaterniond q_f = Eigen::Quaterniond(R_eigen); 
+    q_f = Eigen::Quaterniond(R_eigen); 
     myfile << time_stamp << " " << t_f.at<double>(0) << " " << t_f.at<double>(1) << " " << t_f.at<double>(2) << " ";
     myfile << q_f.x() << " " << q_f.y() << " " << q_f.z() << " " << q_f.w() << endl;
     
+    cv::waitKey(1); 
+    
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    //cout << "output time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "output time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.008223s
 
-    waitKey(1);
-
+    
   }
 
   clock_t end = clock();
