@@ -1,0 +1,42 @@
+# cmake needs this line
+cmake_minimum_required(VERSION 2.8)
+project( vo  )
+
+# Enable C++11
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
+SET(CMAKE_CXX_FLAGS "-std=c++11 -O2 -mcpu=cortex-a53")
+
+# 添加g2o的依赖
+# 因为g2o不是常用库，要添加它的findg2o.cmake文件
+LIST( APPEND CMAKE_MODULE_PATH /home/linaro/xuzhl/g2o/cmake_modules )  
+SET( G2O_ROOT /usr/local/include/g2o )
+find_package(G2O REQUIRED)
+include_directories(${G2O_INCLUDE_DIR})
+message("G2O lib is found:" ${G2O_INCLUDE_DIR})
+
+find_package(CSparse REQUIRED)
+include_directories(${CSPARSE_INCLUDE_DIR})
+message("CSPARSE lib is found:" ${CSPARSE_INCLUDE_DIR})
+
+find_package(Cholmod REQUIRED)
+include_directories(${CHOLMOD_INCLUDE_DIR})
+
+find_package( OpenCV REQUIRED )
+message("opencv lib is found:" ${OpenCV_INCLUDE_DIRS})
+include_directories( ${OpenCV_INCLUDE_DIRS} )
+# find_package(Eigen3)
+# include_directories( ${EIGEN3_INCLUDE_DIR} )
+include_directories( ./include )
+#add_subdirectory( src )
+add_executable( main src/visodo.cpp )
+
+file(GLOB_RECURSE DPU_CODES ${CMAKE_SOURCE_DIR}/model/dpu_superpoint.elf)
+target_link_libraries(main ${DPU_CODES} ${OpenCV_LIBS} 
+    g2o_core 
+    g2o_solver_csparse 
+    g2o_types_sba 
+    g2o_stuff 
+    cxsparse
+    ${G2O_CORE_LIBRARY} ${G2O_STUFF_LIBRARY})
+target_link_libraries(main pthread hineon n2cube dputils)

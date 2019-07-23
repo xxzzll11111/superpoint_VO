@@ -44,6 +44,8 @@ THE SOFTWARE.
 #include <string>
 #include <typeinfo>
 
+#include "top_k.h"
+
 /* header file for DNNDK APIs */
 #include <dnndk/dnndk.h>
 
@@ -56,20 +58,14 @@ THE SOFTWARE.
 #define Feature_Length 65
 #define NMS_Threshold 4
 #define D 256
-#define KEEP_K_POINTS 400
+#define KEEP_K_POINTS 200
 #define NN_thresh 0.7
+#define MATCHER "BF"
+#define CONF_thresh 0.15
 
 using namespace cv;
 using namespace std;
 
-class point
-{
-    public:
-        int W;   
-        int H;  
-        float semi;   
-        point(int a, int b, float c) {H=a;W=b;semi=c;}
-};
 
 void featureTracking(Mat img_1, Mat img_2, vector<Point2f>& points1, vector<Point2f>& points2, vector<uchar>& status)	{ 
 
@@ -133,18 +129,21 @@ void device_close(DPUKernel *kernel, DPUTask *task)
 
 void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
 {
+    long t1,t2;
+    
+    t1=clock();//程序段开始前取得系统运行时间(ms)
     assert(task);
     points.resize(0,Point2f(0,0));
     
     int num = dpuGetInputTensorSize(task, INPUT_NODE);
     int8_t* input_img = new int8_t[num]();
     uint8_t* data = (uint8_t*)img.data;
-    int input_max = 0;
-    int input_min = 128;
+    // int input_max = 0;
+    // int input_min = 128;
     for(int i=0; i<num; i++) {
         input_img[i] = (int8_t)(data[i]/2);
-        if (input_max<input_img[i]) input_max=input_img[i];
-        if (input_min>input_img[i]) input_min=input_img[i];
+        // if (input_max<input_img[i]) input_max=input_img[i];
+        // if (input_min>input_img[i]) input_min=input_img[i];
     }
     // cout << "input_max:" << input_max << endl;
     // cout << "input_min:" << input_min << endl;
@@ -155,9 +154,8 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
     dpuRunTask(task);
     
     /* Get DPU execution time (in us) of CONV Task */
-    long long timeProf = dpuGetTaskProfile(task);
+    // long long timeProf = dpuGetTaskProfile(task);
     //cout << "  DPU CONV Execution time: " << (timeProf * 1.0f) << "us\n";
-    
     
     int num_semi = dpuGetOutputTensorSize(task, OUTPUT_NODE_semi);
 	float* result_semi = new float[num_semi];
@@ -166,20 +164,29 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
     
     dpuGetOutputTensorInHWCFP32(task, OUTPUT_NODE_semi, result_semi, num_semi);
     dpuGetOutputTensorInHWCFP32(task, OUTPUT_NODE_desc, result_desc, num_desc);
-//    
-//    //semi exp
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "       DPU time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    
+    t1=clock();//程序段开始前取得系统运行时间(ms)
+    //semi exp
     // cout << "\nRun exp semi ..." << endl;
     for(int i=0; i<num_semi; i++) {
-		result_semi[i] = exp(result_semi[i]);
+		result_semi[i] = exp(result_semi[i]); //e^x
+        // result_semi[i] = pow(2, result_semi[i]); //2^x
+        // result_semi[i] = pow(4, result_semi[i]); //4^x
 	}
-//    
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "       exp time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    
+    t1=clock();//程序段开始前取得系统运行时间(ms)  
     float semi[Height][Width];
+    point coarse_semi[Height/Cell][Width/Cell];
     float coarse_desc[Height/Cell][Width/Cell][D];
     
     // cout << "\nRun normalize ..." << endl;
     for(int i=0; i<Height/Cell; i++) {
         for(int j=0; j<Width/Cell; j++) {
-            //semi normalize
+            //semi softmax
             float cell_sum = 0;
             for(int k=0; k<Feature_Length; k++) {
                 cell_sum = cell_sum + result_semi[k+j*Feature_Length+i*Feature_Length*Width/Cell];
@@ -190,6 +197,20 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
                 }
             }
             
+            //max 1 point
+            /* float max_semi=0;
+            for(int kh=0; kh<Cell; kh++) {
+                for(int kw=0; kw<Cell; kw++) {
+                    if(semi[kh+i*Cell][kw+j*Cell] > max_semi) {
+                        max_semi = semi[kh+i*Cell][kw+j*Cell];
+                        coarse_semi[i][j].H = kh+i*Cell;
+                        coarse_semi[i][j].W = kw+j*Cell;
+                        coarse_semi[i][j].semi = max_semi;
+                    }
+                }
+            } */
+            
+            //desc normalize
             float desc_sum_2 = 0;
             for(int k=0; k<D; k++) {
                 desc_sum_2 = desc_sum_2 + pow(result_desc[k+j*D+i*D*Width/Cell],2);
@@ -197,14 +218,21 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
             float desc_sum = sqrt(desc_sum_2);
             for(int k=0; k<D; k++) {
                 coarse_desc[i][j][k] = result_desc[k+j*D+i*D*Width/Cell]/desc_sum;
+                // coarse_desc[i][j][k] = (float)(int)(result_desc[k+j*D+i*D*Width/Cell]/desc_sum*512);
+                // coarse_desc[i][j][k] = coarse_desc[i][j][k]>127? 127:coarse_desc[i][j][k];
+                // coarse_desc[i][j][k] = coarse_desc[i][j][k]<-128? -128:coarse_desc[i][j][k];
             }
         }
     }
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "       normalize time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
     
+    t1=clock();//程序段开始前取得系统运行时间(ms)
     //nms_fast(semi, Height, Width, NMS_Threshold);
     // cout << "\nRun NMS ..." << endl;
     vector<point> tmp_point;
     
+    //NMS
     for(int i=0; i<Height; i++) {
         for(int j=0; j<Width; j++) {
             if(semi[i][j] != 0) {
@@ -223,8 +251,33 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
         }
     }
     
+    //coarse NMS
+    /* for(int i=0; i<Height/Cell; i++) {
+        for(int j=0; j<Width/Cell; j++) {
+            if(coarse_semi[i][j].semi != 0) {
+                float tmp_semi = coarse_semi[i][j].semi;
+                for(int kh=max(0,i-1); kh<min(Height/Cell,i+1+1); kh++)
+                    for(int kw=max(0,j-1); kw<min(Width/Cell,j+1+1); kw++)
+                        if(i!=kh||j!=kw) {
+                            if(abs(coarse_semi[i][j].H-coarse_semi[kh][kw].H)<=NMS_Threshold && abs(coarse_semi[i][j].W-coarse_semi[kh][kw].W)<=NMS_Threshold) {
+                                if(tmp_semi>=coarse_semi[kh][kw].semi)
+                                    coarse_semi[kh][kw].semi = 0;
+                                else
+                                    coarse_semi[i][j].semi = 0;
+                            }
+                        }
+                if(coarse_semi[i][j].semi!=0)
+                    tmp_point.push_back(coarse_semi[i][j]);
+            }
+        }
+    } */
+    cout<<"tmp_point.size:"<<tmp_point.size()<<endl;
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "       NMS time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    
+    t1=clock();//程序段开始前取得系统运行时间(ms)
     //rank POINTS
-    for(int i=0; i<min( KEEP_K_POINTS, int(tmp_point.size()-1) ); i++) {
+    /* for(int i=0; i<min( KEEP_K_POINTS, int(tmp_point.size()-1) ); i++) {
         for(int j=tmp_point.size()-1; j>i; j--) {
             if(tmp_point[j].semi>tmp_point[j-1].semi) {
                 swap(tmp_point[j], tmp_point[j-1]);
@@ -232,8 +285,34 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
         }
     }
     //KEEP K POINTS
-    if(tmp_point.size()>KEEP_K_POINTS) tmp_point.resize(KEEP_K_POINTS, point(0,0,0));
+    if(tmp_point.size()>KEEP_K_POINTS) tmp_point.resize(KEEP_K_POINTS, point(0,0,0)); */
     
+    top_k(tmp_point,tmp_point.size(),KEEP_K_POINTS);
+    // top_k_with_NMS(tmp_point,tmp_point.size(),KEEP_K_POINTS,NMS_Threshold);
+    
+    
+    //CONF_thresh
+    // for(int i=0; i<tmp_point.size(); i++) {
+        // if(tmp_point[i].semi < CONF_thresh) {
+            // tmp_point.erase(tmp_point.begin()+i);
+            // i--;
+        // }
+    // }
+    
+    /* double min_conf=10000, max_conf=0;
+    for ( int i = 0; i < tmp_point.size(); i++ )
+    {
+        double conf = tmp_point[i].semi;
+        if ( conf < min_conf ) min_conf = conf;
+        if ( conf > max_conf ) max_conf = conf;
+    }
+    printf ( "-- Max conf : %f \n", max_conf );
+    printf ( "-- Min conf : %f \n", min_conf ); */
+    
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "       rank time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    
+    t1=clock();//程序段开始前取得系统运行时间(ms)
     desc.create( int(tmp_point.size()), D, CV_32FC1);
     
     for(int i=0; i<tmp_point.size(); i++) {
@@ -242,6 +321,8 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
         for(int j = 0; j < desc.cols; j++)
             pData[j] = coarse_desc[tmp_point[i].H/Cell][tmp_point[i].W/Cell][j];
     }
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "       output time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
     
     delete[] input_img;
     delete[] result_semi;
@@ -260,85 +341,100 @@ Point2d pixel2cam ( const Point2d& p, const Mat& K )
 
 
 
-void featureTracking_superpoint(DPUTask *task, Mat img_1, Mat img_2, Mat depth_1, Mat K, vector<Point3f>& points1, vector<Point2f>& points2)	{ 
+void featureTracking_superpoint(DPUTask *task, vector<Point2f>& points1, Mat& desc1, Mat& img_2, Mat depth_1, Mat K, vector<Point3f>& points_3d, vector<Point2f>& points_2d)	{ 
 
 //this function automatically gets rid of points for which tracking fails
     long t1,t2;
-    
-    Mat desc1;
+    vector<Point2f>points2;
     Mat desc2;
-    vector<Point2f>points1_tmp, points2_tmp;
-    points1.resize(0,Point3f(0,0,0));
-    points2.resize(0,Point2f(0,0));
+    points_3d.resize(0,Point3f(0,0,0));
+    points_2d.resize(0,Point2f(0,0));
     
     t1=clock();//程序段开始前取得系统运行时间(ms)
-    run_superpoint(task, img_1, points1_tmp, desc1);
-    run_superpoint(task, img_2, points2_tmp, desc2);
+    run_superpoint(task, img_2, points2, desc2);
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    cout << "   run_superpoint time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.281702s
+    cout << "   run_superpoint time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
     
     t1=clock();//程序段开始前取得系统运行时间(ms)
     vector<DMatch> matches;
-    BFMatcher matcher(NORM_L2, true);
-    matcher.match(desc1, desc2, matches);
-    // cout <<  "matches size:" << matches.size() << endl;
+    if( MATCHER == "BF" ) {
+        BFMatcher matcher(NORM_L2, true);
+        matcher.match(desc1, desc2, matches);
+    }
+    else {
+        FlannBasedMatcher matcher;
+        matcher.match(desc1, desc2, matches);
+    }
+    cout <<  "desc1 size:" << desc1.size() << endl;
+    cout <<  "matches size:" << matches.size() << endl;
+    // cout <<  "matches[0].distance:" << matches[0].distance << endl;
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    cout << "   BFmatch time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "   match time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.231208s
     
     t1=clock();//程序段开始前取得系统运行时间(ms)
+    
+    //-- 第四步:匹配点对筛选
+    double min_dist=10000, max_dist=0;
+    //找出所有匹配之间的最小距离和最大距离, 即是最相似的和最不相似的两组点之间的距离
+    for ( int i = 0; i < desc1.rows; i++ )
+    {
+        double dist = matches[i].distance;
+        if ( dist < min_dist ) min_dist = dist;
+        if ( dist > max_dist ) max_dist = dist;
+    }
+    printf ( "-- Max dist : %f \n", max_dist );
+    printf ( "-- Min dist : %f \n", min_dist );
+    
     vector <Point2f> RAN_KP1, RAN_KP2;
     for(int i=0; i<matches.size(); i++) {
-        if ( matches[i].distance>NN_thresh )
+        if ( matches[i].distance>NN_thresh )//360)//
             continue;
-        if ( abs(points1_tmp[matches[i].queryIdx].x-points2_tmp[matches[i].trainIdx].x)> Width/10 )
+        if ( abs(points1[matches[i].queryIdx].x-points2[matches[i].trainIdx].x)> Width/10 )
             continue;
-        if ( abs(points1_tmp[matches[i].queryIdx].y-points2_tmp[matches[i].trainIdx].y)> Height/10 )
+        if ( abs(points1[matches[i].queryIdx].y-points2[matches[i].trainIdx].y)> Height/10 )
             continue;
-        RAN_KP1.push_back(points1_tmp[matches[i].queryIdx]);
-        RAN_KP2.push_back(points2_tmp[matches[i].trainIdx]);
+        RAN_KP1.push_back(points1[matches[i].queryIdx]);
+        RAN_KP2.push_back(points2[matches[i].trainIdx]);
         //RAN_KP1是要存储img01中能与img02匹配的点
     }
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    cout << "   thresh check time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "   thresh check time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//5.3e-05s
     
     t1=clock();//程序段开始前取得系统运行时间(ms)
-    //cout <<  "RAN_KP1 size:" << RAN_KP1.size() << endl;
+    cout <<  "RAN_KP1 size:" << RAN_KP1.size() << endl;
     vector<uchar> RansacStatus;
 	Mat Fundamental = findFundamentalMat(RAN_KP1, RAN_KP2, RansacStatus, FM_RANSAC);
-	//重新定义关键点RR_KP和RR_matches来存储新的关键点和基础矩阵，通过RansacStatus来删除误匹配点
-	vector <Point2f> RR_KP1, RR_KP2;
-	for (size_t i = 0; i < RansacStatus.size(); i++)
-	{
-		if (RansacStatus[i] != 0)
-		{
-			RR_KP1.push_back(RAN_KP1[i]);
-			RR_KP2.push_back(RAN_KP2[i]);
-		}
-	}
+	//通过RansacStatus来删除误匹配点
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    cout << "   RANSAC time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "   RANSAC time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.001139s
     
     t1=clock();//程序段开始前取得系统运行时间(ms)
-    // cout << "RR_KP1 size:" << RR_KP1.size() << endl;
-    for ( int i=0; i<RR_KP1.size(); i++ )
+    for ( int i=0; i<RAN_KP1.size(); i++ )
     {
-        ushort d = depth_1.ptr<unsigned short> (int ( RR_KP1[i].y )) [ int ( RR_KP1[i].x ) ];
+        if (RansacStatus[i] == 0)
+            continue;
+        ushort d = depth_1.ptr<unsigned short> (int ( RAN_KP1[i].y )) [ int ( RAN_KP1[i].x ) ];
         if ( d == 0 )   // bad depth
             continue;
         float dd = d/5000.0;
-        Point2d p1 = pixel2cam ( RR_KP1[i], K );
-        points1.push_back ( Point3f ( p1.x*dd, p1.y*dd, dd ) );
-        points2.push_back ( RR_KP2[i] );
+        Point2d p1 = pixel2cam ( RAN_KP1[i], K );
+        points_3d.push_back ( Point3f ( p1.x*dd, p1.y*dd, dd ) );
+        points_2d.push_back ( RAN_KP2[i] );
         
-        line(img_2, RR_KP1[i], RR_KP2[i], Scalar(0, 0, 255));
-        circle(img_2, RR_KP2[i], 4, cv::Scalar(0, 0, 255));
+        line(img_2, RAN_KP1[i], RAN_KP2[i], Scalar(0, 0, 255));
+        circle(img_2, RAN_KP2[i], 4, cv::Scalar(0, 0, 255));
     }
 
-    // cout<<"3d-2d pairs: "<<points1.size() <<endl;
+    cout<<"3d-2d pairs: "<<points_3d.size() <<endl;
+        
+    //assert( points_3d.size() >= 50 );
     imshow( "Road facing camera", img_2 );
     
+    points1 = points2;
+    desc1 = desc2;
+    
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    cout << "   2d_to_3d time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "   2d_to_3d time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.000659s
 }
 
 
@@ -370,43 +466,71 @@ void selectMax(int r, std::vector<KeyPoint> & kp){
 
 }
 
-void find_feature_matches ( const Mat& img_1, const Mat& img_2,
-                            std::vector<Point2f>& RAN_KP1,
-                            std::vector<Point2f>& RAN_KP2 )
+void run_orb ( const Mat& img, vector<Point2f>& point, Mat& descriptors )
 {
-    //-- 初始化
-    vector<KeyPoint> keypoint1, keypoint2;
-    Mat descriptors_1, descriptors_2;
     // used in OpenCV3
     Ptr<FeatureDetector> detector = ORB::create( 2000 );
     Ptr<DescriptorExtractor> descriptor = ORB::create();
     // use this if you are in OpenCV2
     // Ptr<FeatureDetector> detector = FeatureDetector::create ( "ORB" );
     // Ptr<DescriptorExtractor> descriptor = DescriptorExtractor::create ( "ORB" );
-    Ptr<DescriptorMatcher> matcher  = DescriptorMatcher::create ( "BruteForce-Hamming" );
+    
     //-- 第一步:检测 Oriented FAST 角点位置
-    detector->detect ( img_1,keypoint1 );
-    detector->detect ( img_2,keypoint2 );
+    vector<KeyPoint> keypoint;
+    detector->detect ( img,keypoint );
     //NMS
-    selectMax(NMS_Threshold, keypoint1);
-    selectMax(NMS_Threshold, keypoint2);
-    cout << "keypoints_1 size:" << keypoint1.size() << endl;
-    cout << "keypoints_2 size:" << keypoint2.size() << endl;
+    selectMax(NMS_Threshold, keypoint);
+    cout << "keypoints size:" << keypoint.size() << endl;
+    
+    for(int i=0; i<min( KEEP_K_POINTS, int(keypoint.size()-1) ); i++) {
+        for(int j=keypoint.size()-1; j>i; j--) {
+            if(keypoint[j].response>keypoint[j-1].response) {
+                swap(keypoint[j], keypoint[j-1]);
+            }
+        }
+    }
+    if(keypoint.size()>KEEP_K_POINTS) keypoint.resize(KEEP_K_POINTS, KeyPoint());
 
     //-- 第二步:根据角点位置计算 BRIEF 描述子
-    descriptor->compute ( img_1, keypoint1, descriptors_1 );
-    descriptor->compute ( img_2, keypoint2, descriptors_2 );
+    descriptor->compute ( img, keypoint, descriptors );
+    
+    for(int i=0; i<keypoint.size(); i++) {
+        point.push_back(keypoint[i].pt);
+    }
+}
 
+void featureTracking_ORB(vector<Point2f>& keypoint1, Mat& desc1, Mat img_2, Mat depth_1, Mat K, vector<Point3f>& points_3d, vector<Point2f>& points_2d)	
+
+{ 
+    points_3d.resize(0,Point3f(0,0,0));
+    points_2d.resize(0,Point2f(0,0));
+    vector<Point2f>keypoint2;
+    Mat desc2;
+    
+    run_orb(img_2, keypoint2, desc2);
+    
     //-- 第三步:对两幅图像中的BRIEF描述子进行匹配，使用 Hamming 距离
     vector<DMatch> matches;
     // BFMatcher matcher ( NORM_HAMMING );
-    matcher->match ( descriptors_1, descriptors_2, matches );
+    if( MATCHER == "BF" ) {
+        Ptr<DescriptorMatcher> matcher  = DescriptorMatcher::create ( "BruteForce-Hamming" );
+        matcher->match ( desc1, desc2, matches );
+    }
+    else {
+         // the descriptor for FlannBasedMatcher should has matrix element of CV_32F
+        if( desc1.type()!=CV_32F ) 
+            desc1.convertTo( desc1, CV_32F );
+        if( desc2.type()!=CV_32F ) 
+            desc2.convertTo( desc2, CV_32F );
+        Ptr<DescriptorMatcher> matcher  = DescriptorMatcher::create ( "FlannBased" );
+        matcher->match ( desc1, desc2, matches );
+    }
 
     //-- 第四步:匹配点对筛选
     double min_dist=10000, max_dist=0;
 
     //找出所有匹配之间的最小距离和最大距离, 即是最相似的和最不相似的两组点之间的距离
-    for ( int i = 0; i < descriptors_1.rows; i++ )
+    for ( int i = 0; i < desc1.rows; i++ )
     {
         double dist = matches[i].distance;
         if ( dist < min_dist ) min_dist = dist;
@@ -417,152 +541,147 @@ void find_feature_matches ( const Mat& img_1, const Mat& img_2,
     printf ( "-- Min dist : %f \n", min_dist );
 
     //当描述子之间的距离大于两倍的最小距离时,即认为匹配有误.但有时候最小距离会非常小,设置一个经验值30作为下限.
+    vector <Point2f> RAN_KP1, RAN_KP2;
     for(int i=0; i<matches.size(); i++) {
-     
-        if ( matches[i].distance> max ( 2*min_dist, 30.0 ) )
+        if ( matches[i].distance> max ( 2*min_dist, 300.0 ) )
             continue;
-        if ( abs(keypoint1[matches[i].queryIdx].pt.x-keypoint2[matches[i].trainIdx].pt.x)> Width/10 )
+        if ( abs(keypoint1[matches[i].queryIdx].x-keypoint2[matches[i].trainIdx].x)> Width/10 )
             continue;
-        if ( abs(keypoint1[matches[i].queryIdx].pt.y-keypoint2[matches[i].trainIdx].pt.y)> Height/10 )
+        if ( abs(keypoint1[matches[i].queryIdx].y-keypoint2[matches[i].trainIdx].y)> Height/10 )
             continue;
-        RAN_KP1.push_back(keypoint1[matches[i].queryIdx].pt);
-        RAN_KP2.push_back(keypoint2[matches[i].trainIdx].pt);
+        RAN_KP1.push_back(keypoint1[matches[i].queryIdx]);
+        RAN_KP2.push_back(keypoint2[matches[i].trainIdx]);
         //RAN_KP1是要存储img01中能与img02匹配的点
     }
-}
-
-void featureTracking_ORB(Mat img_1, Mat img_2, Mat depth_1, Mat K, vector<Point3f>& points1, vector<Point2f>& points2)	
-{ 
-    points1.resize(0,Point3f(0,0,0));
-    points2.resize(0,Point2f(0,0));
-    vector <Point2f> RAN_KP1, RAN_KP2;
-    vector<DMatch> matches;
-    find_feature_matches ( img_1, img_2, RAN_KP1, RAN_KP2 );
-    cout<<"match pairs: "<<matches.size() <<endl;
     
     //cout <<  "RAN_KP1 size:" << RAN_KP1.size() << endl;
     vector<uchar> RansacStatus;
 	Mat Fundamental = findFundamentalMat(RAN_KP1, RAN_KP2, RansacStatus, FM_RANSAC);
 	//重新定义关键点RR_KP和RR_matches来存储新的关键点和基础矩阵，通过RansacStatus来删除误匹配点
-	vector <Point2f> RR_KP1, RR_KP2;
-	for (size_t i = 0; i < RansacStatus.size(); i++)
-	{
-		if (RansacStatus[i] != 0)
-		{
-			RR_KP1.push_back(RAN_KP1[i]);
-			RR_KP2.push_back(RAN_KP2[i]);
-		}
-	}
     
-    cout << "RR_KP1 size:" << RR_KP1.size() << endl;
-    for ( int i=0; i<RR_KP1.size(); i++ )
+    cout << "RAN_KP1 size:" << RAN_KP1.size() << endl;
+    for ( int i=0; i<RAN_KP1.size(); i++ )
     {
-        ushort d = depth_1.ptr<unsigned short> (int ( RR_KP1[i].y )) [ int ( RR_KP1[i].x ) ];
+        if (RansacStatus[i] == 0)
+            continue;
+        ushort d = depth_1.ptr<unsigned short> (int ( RAN_KP1[i].y )) [ int ( RAN_KP1[i].x ) ];
         if ( d == 0 )   // bad depth
             continue;
         float dd = d/5000.0;
-        Point2d p1 = pixel2cam ( RR_KP1[i], K );
-        points1.push_back ( Point3f ( p1.x*dd, p1.y*dd, dd ) );
-        points2.push_back ( RR_KP2[i] );
+        Point2d p1 = pixel2cam ( RAN_KP1[i], K );
+        points_3d.push_back ( Point3f ( p1.x*dd, p1.y*dd, dd ) );
+        points_2d.push_back ( RAN_KP2[i] );
         
-        line(img_2, RR_KP1[i], RR_KP2[i], Scalar(0, 0, 255));
-        circle(img_2, RR_KP2[i], 4, cv::Scalar(0, 0, 255));
+        line(img_2, RAN_KP1[i], RAN_KP2[i], Scalar(0, 0, 255));
+        circle(img_2, RAN_KP2[i], 4, cv::Scalar(0, 0, 255));
     }
 
-    cout<<"3d-2d pairs: "<<points1.size() <<endl;
+    cout<<"3d-2d pairs: "<<points_3d.size() <<endl;
     imshow( "Road facing camera", img_2 );
+    
+    keypoint1 = keypoint2;
+    //cout << "keypoints size:" << keypoint1.size() << endl;
+    desc1 = desc2;
 }
 
-void featureTracking_sift(Mat img_1, Mat img_2, Mat depth_1, Mat K, vector<Point3f>& points1, vector<Point2f>& points2)	{ 
+
+void run_sift ( const Mat& img, vector<Point2f>& point, Mat& descriptors )
+{
+    // used in OpenCV3
+    Ptr<FeatureDetector> detector = xfeatures2d::SIFT::create( KEEP_K_POINTS,  3, 0.04, 3, 1.6 );
+    Ptr<DescriptorExtractor> descriptor = xfeatures2d::SIFT::create();
+    // use this if you are in OpenCV2
+    // Ptr<FeatureDetector> detector = FeatureDetector::create ( "ORB" );
+    // Ptr<DescriptorExtractor> descriptor = DescriptorExtractor::create ( "ORB" );
+    
+    //-- 第一步:检测 keypoint 角点位置
+    vector<KeyPoint> keypoint;
+    detector->detect ( img,keypoint );
+    //NMS
+    // selectMax(NMS_Threshold, keypoint);
+    //cout << "keypoints size:" << keypoint.size() << endl;
+
+    //-- 第二步:根据角点位置计算 BRIEF 描述子
+    descriptor->compute ( img, keypoint, descriptors );
+    
+    for(int i=0; i<keypoint.size(); i++) {
+        point.push_back(keypoint[i].pt);
+    }
+}
+
+void featureTracking_sift(vector<Point2f>& keypoint1, Mat& desc1, Mat img_2, Mat depth_1, Mat K, vector<Point3f>& points_3d, vector<Point2f>& points_2d)	{ 
 
 //this function automatically gets rid of points for which tracking fails
     long t1,t2;
-    Mat desc1;
+    vector<Point2f>keypoint2;
     Mat desc2;
-    vector<KeyPoint> keypoint1,keypoint2;
-    points1.resize(0,Point3f(0,0,0));
-    points2.resize(0,Point2f(0,0));
-    Ptr<FeatureDetector> detector = xfeatures2d::SIFT::create( KEEP_K_POINTS,  3, 0.04, 3, 1.6 );
-    Ptr<DescriptorExtractor> descriptor = xfeatures2d::SIFT::create();
+    points_3d.resize(0,Point3f(0,0,0));
+    points_2d.resize(0,Point2f(0,0));
     
     t1=clock();//程序段开始前取得系统运行时间(ms)
-    detector->detect(img_1,keypoint1);
-    detector->detect(img_2,keypoint2);
-    // selectMax(NMS_Threshold, keypoint1);
-    // selectMax(NMS_Threshold, keypoint2);
-    cout << "keypoints_1 size:" << keypoint1.size() << endl;
-    cout << "keypoints_2 size:" << keypoint2.size() << endl;
-    
-    descriptor->compute(img_1,keypoint1,desc1);
-    descriptor->compute(img_2,keypoint2,desc2);
+    run_sift(img_2, keypoint2, desc2);
     t2=clock();//程序段结束后取得系统运行时间(ms)
-    cout << "run_superpoint time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "   run_sift time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
     
     t1=clock();//程序段开始前取得系统运行时间(ms)
     vector<DMatch> matches;
-    BFMatcher matcher(NORM_L2, true);
-    matcher.match(desc1, desc2, matches);
-    cout <<  "matches size:" << matches.size() << endl;
-    
-    //-- 第四步:匹配点对筛选
-    double min_dist=10000, max_dist=0;
-
-    //找出所有匹配之间的最小距离和最大距离, 即是最相似的和最不相似的两组点之间的距离
-    for ( int i = 0; i < matches.size(); i++ )
-    {
-        double dist = matches[i].distance;
-        if ( dist < min_dist ) min_dist = dist;
-        if ( dist > max_dist ) max_dist = dist;
+    if( MATCHER == "BF" ) {
+        BFMatcher matcher(NORM_L2, true);
+        matcher.match(desc1, desc2, matches);
     }
-
-    printf ( "-- Max dist : %f \n", max_dist );
-    printf ( "-- Min dist : %f \n", min_dist );
+    else {
+        FlannBasedMatcher matcher;
+        matcher.match(desc1, desc2, matches);
+    }
+    //cout <<  "desc1 size:" << desc1.size() << endl;
+    //cout <<  "matches size:" << matches.size() << endl;
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "   BFmatch time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.231208s
     
     //cout << "RAN_KP" << endl;
     vector <Point2f> RAN_KP1, RAN_KP2;
     for(int i=0; i<matches.size(); i++) {
         if ( matches[i].distance> 200 )
             continue;
-        if ( abs(keypoint1[matches[i].queryIdx].pt.x-keypoint2[matches[i].trainIdx].pt.x)> Width/10 )
+        if ( abs(keypoint1[matches[i].queryIdx].x-keypoint2[matches[i].trainIdx].x)> Width/10 )
             continue;
-        if ( abs(keypoint1[matches[i].queryIdx].pt.y-keypoint2[matches[i].trainIdx].pt.y)> Height/10 )
+        if ( abs(keypoint1[matches[i].queryIdx].y-keypoint2[matches[i].trainIdx].y)> Height/10 )
             continue;
-        RAN_KP1.push_back(keypoint1[matches[i].queryIdx].pt);
-        RAN_KP2.push_back(keypoint2[matches[i].trainIdx].pt);
+        RAN_KP1.push_back(keypoint1[matches[i].queryIdx]);
+        RAN_KP2.push_back(keypoint2[matches[i].trainIdx]);
         //RAN_KP1是要存储img01中能与img02匹配的点
     }
     
+    t1=clock();//程序段开始前取得系统运行时间(ms)
     //cout <<  "RAN_KP1 size:" << RAN_KP1.size() << endl;
     vector<uchar> RansacStatus;
 	Mat Fundamental = findFundamentalMat(RAN_KP1, RAN_KP2, RansacStatus, FM_RANSAC);
-	//重新定义关键点RR_KP和RR_matches来存储新的关键点和基础矩阵，通过RansacStatus来删除误匹配点
-	vector <Point2f> RR_KP1, RR_KP2;
-	for (size_t i = 0; i < RansacStatus.size(); i++)
-	{
-		if (RansacStatus[i] != 0)
-		{
-			RR_KP1.push_back(RAN_KP1[i]);
-			RR_KP2.push_back(RAN_KP2[i]);
-		}
-	}
+	//通过RansacStatus来删除误匹配点
+    t2=clock();//程序段结束后取得系统运行时间(ms)
+    cout << "   RANSAC time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;//0.001139s
     
-    cout << "RR_KP1 size:" << RR_KP1.size() << endl;
-    for ( int i=0; i<RR_KP1.size(); i++ )
+    t1=clock();//程序段开始前取得系统运行时间(ms)
+    for ( int i=0; i<RAN_KP1.size(); i++ )
     {
-        ushort d = depth_1.ptr<unsigned short> (int ( RR_KP1[i].y )) [ int ( RR_KP1[i].x ) ];
+        if (RansacStatus[i] == 0)
+            continue;
+        ushort d = depth_1.ptr<unsigned short> (int ( RAN_KP1[i].y )) [ int ( RAN_KP1[i].x ) ];
         if ( d == 0 )   // bad depth
             continue;
         float dd = d/5000.0;
-        Point2d p1 = pixel2cam ( RR_KP1[i], K );
-        points1.push_back ( Point3f ( p1.x*dd, p1.y*dd, dd ) );
-        points2.push_back ( RR_KP2[i] );
+        Point2d p1 = pixel2cam ( RAN_KP1[i], K );
+        points_3d.push_back ( Point3f ( p1.x*dd, p1.y*dd, dd ) );
+        points_2d.push_back ( RAN_KP2[i] );
         
-        line(img_2, RR_KP1[i], RR_KP2[i], Scalar(0, 0, 255));
-        circle(img_2, RR_KP2[i], 4, cv::Scalar(0, 0, 255));
+        line(img_2, RAN_KP1[i], RAN_KP2[i], Scalar(0, 0, 255));
+        circle(img_2, RAN_KP2[i], 4, cv::Scalar(0, 0, 255));
     }
 
-    cout<<"3d-2d pairs: "<<points1.size() <<endl;
+    // cout<<"3d-2d pairs: "<<points_3d.size() <<endl;
     imshow( "Road facing camera", img_2 );
+    
+    keypoint1 = keypoint2;
+    desc1 = desc2;
     
     t2=clock();//程序段结束后取得系统运行时间(ms)
     cout << "match time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
