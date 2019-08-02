@@ -26,7 +26,7 @@ $DATA_DIR
 └─ match.txt
 ```
 
-其中`match.txt`由[associate.py](https://svncvpr.in.tum.de/cvpr-ros-pkg/trunk/rgbd_benchmark/rgbd_benchmark_tools/src/rgbd_benchmark_tools/associate.py)生成：
+其中`match.txt`由TUM官网上的[associate.py](https://svncvpr.in.tum.de/cvpr-ros-pkg/trunk/rgbd_benchmark/rgbd_benchmark_tools/src/rgbd_benchmark_tools/associate.py)生成：
 
 ```
 python associate.py ./rgb.txt ./depth.txt
