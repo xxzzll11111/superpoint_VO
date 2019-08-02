@@ -176,6 +176,8 @@ int main( int argc, char** argv )	{
   device_setup(kernel, task);
   
   long t1,t2;
+  
+  Size dsize = Size(640,480);
 
   Mat img_1;
   Mat R_f, t_f; //the final rotation and tranlation vectors containing the 
@@ -201,6 +203,8 @@ int main( int argc, char** argv )	{
   //read the first two frames from the dataset
   Mat img_1_c = imread(filename1);
   Mat d1 = imread ( depthname1, CV_LOAD_IMAGE_UNCHANGED );       // 深度图为16位无符号数，单通道图像
+  resize(d1, d1, dsize);
+  cout << "d1.type : " << d1.type() << endl;
   cout << "d1.type : " << d1.type() << endl;
 
   if ( !img_1_c.data ) { 
@@ -209,6 +213,7 @@ int main( int argc, char** argv )	{
 
   // we work with grayscale images
   cvtColor(img_1_c, img_1, COLOR_BGR2GRAY);
+  resize(img_1, img_1, dsize);
 
   // feature detection, tracking
   vector<Point2f> points1;
@@ -256,6 +261,7 @@ int main( int argc, char** argv )	{
   	t1=clock();//程序段开始前取得系统运行时间(ms)
 
     dpic = imread ( depthname1, CV_LOAD_IMAGE_UNCHANGED );       // 深度图为16位无符号数，单通道图像
+    resize(dpic, dpic, dsize);
     
     if(!get_Name_and_Scale(numFrame, filename, depthname1, time_stamp))
         break;
@@ -264,6 +270,7 @@ int main( int argc, char** argv )	{
   	Mat currImage_c = imread(filename);
   	
     cvtColor(currImage_c, currImage, COLOR_BGR2GRAY);
+    resize(currImage, currImage, dsize);
   	// vector<uchar> status;
   	
     t2=clock();//程序段结束后取得系统运行时间(ms)
@@ -279,10 +286,10 @@ int main( int argc, char** argv )	{
         featureTracking_sift(prevFeatures, prevDesc, currImage, dpic, K, points_3d, points_2d);
     else
         featureTracking_superpoint(task, prevFeatures, prevDesc, currImage, dpic, K, points_3d, points_2d);
-    if(points_3d.size() < 40)
+    if(points_3d.size() < 1000)
     {
         char outname[100];
-        sprintf(outname, "../output/%s_%d_%d.png", time_stamp, numFrame, points_3d.size());
+        sprintf(outname, "../output/%4d_%s_%d.png",numFrame,  time_stamp, points_3d.size());
         imwrite(outname, currImage);
     }
     t2=clock();//程序段结束后取得系统运行时间(ms)

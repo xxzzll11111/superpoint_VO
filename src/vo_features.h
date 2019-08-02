@@ -299,7 +299,7 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
         // }
     // }
     
-    /* double min_conf=10000, max_conf=0;
+    double min_conf=10000, max_conf=0;
     for ( int i = 0; i < tmp_point.size(); i++ )
     {
         double conf = tmp_point[i].semi;
@@ -307,7 +307,7 @@ void run_superpoint(DPUTask *task, Mat img, vector<Point2f>& points, Mat& desc)
         if ( conf > max_conf ) max_conf = conf;
     }
     printf ( "-- Max conf : %f \n", max_conf );
-    printf ( "-- Min conf : %f \n", min_conf ); */
+    printf ( "-- Min conf : %f \n", min_conf );
     
     t2=clock();//程序段结束后取得系统运行时间(ms)
     cout << "       rank time:" << float(t2-t1)/CLOCKS_PER_SEC << "s" << endl;
@@ -411,9 +411,11 @@ void featureTracking_superpoint(DPUTask *task, vector<Point2f>& points1, Mat& de
     t1=clock();//程序段开始前取得系统运行时间(ms)
     for ( int i=0; i<RAN_KP1.size(); i++ )
     {
+        //cout<<i<<endl;
         if (RansacStatus[i] == 0)
             continue;
         ushort d = depth_1.ptr<unsigned short> (int ( RAN_KP1[i].y )) [ int ( RAN_KP1[i].x ) ];
+        // uint8_t d = depth_1.ptr<uint8_t> (int ( RAN_KP1[i].y )) [ int ( RAN_KP1[i].x ) ];
         if ( d == 0 )   // bad depth
             continue;
         float dd = d/5000.0;
