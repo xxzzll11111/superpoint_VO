@@ -80,3 +80,15 @@ cmake .. && make
 ```c++
 #define KEEP_K_POINTS 200
 ```
+
+* descriptor匹配间距的阈值
+```c++
+#define NN_thresh 0.7
+```
+
+* descriptor匹配方法
+    * BF：暴力匹配
+    * FlannBased：Fast Library forApproximate Nearest Neighbors，一种近似方法
+```c++
+#define MATCHER "BF"
+```
